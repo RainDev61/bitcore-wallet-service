@@ -27,11 +27,11 @@ var config = {
   blockchainExplorerOpts: {
     livenet: {
       provider: 'insight',
-      url: 'https://insight.bitpay.com:443',
+      url: 'http://explorer.startcoin.org',
     },
     testnet: {
       provider: 'insight',
-      url: 'https://test-insight.bitpay.com:443',
+      url: 'http://testnet.explorer.startcoin.org',
     },
   },
 };
