@@ -4,11 +4,11 @@ var config = {
   BlockchainMonitor: {
     livenet: {
       name: 'insight',
-      url: 'https://insight.bitpay.com:443',
+      url: 'http://explorer.startcoin.org',
     },
     testnet: {
       name: 'insight',
-      url: 'https://test-insight.bitpay.com:443',
+      url: 'http://testnet.explorer.startcoin.org',
     },
   },
   WalletService: {
