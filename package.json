@@ -11,17 +11,17 @@
     "bitcore"
   ],
   "repository": {
-    "url": "git@github.com:bitpay/bitcore-wallet-service.git",
+    "url": "git@github.com:startcoin-project/bitcore-wallet-service.git",
     "type": "git"
   },
   "bugs": {
-    "url": "https://github.com/bitpay/bitcore-wallet-service/issues"
+    "url": "https://github.com/startcoin-project/bitcore-wallet-service/issues"
   },
   "dependencies": {
     "async": "^0.9.0",
-    "bitcore": "^0.11.6",
-    "bitcore-explorers": "^0.10.3",
-    "bitcore-wallet-utils": "0.0.12",
+    "bitcore": "git://github.com/startcoin-project/bitcore.git#d36d6c00d77ef5ac998b6588e1671689b3b8658f",
+    "bitcore-explorers": "git://github.com/startcoin-project/bitcore-explorers.git#8c50bf7c034eca9625695290da8a65a8f46b6164",
+    "bitcore-wallet-utils": "git://github.com/startcoin-project/bitcore-wallet-utils.git#e0065090cea2a1972caab1bd1f1a049d37a178b4",
     "body-parser": "^1.11.0",
     "coveralls": "^2.11.2",
     "express": "^4.10.0",
