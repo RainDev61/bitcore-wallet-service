@@ -13,7 +13,7 @@ Bitcore Wallet Service facilitates multisig HD wallets creation and operation th
 
 BWS can usually be installed within minutes and acommodates all the needed infrastruture for peers in a multisig wallet to communicate, and operate with minimun server trust.
   
-See [Bitcore-wallet-client] (https://github.com/bitpay/bitcore-wallet-client) for the *official* client library that communicates to BWS, and verifies its responsed. Also check [Bitcore-wallet] (https://github.com/bitpay/bitcore-wallet) for a simple CLI wallet implementation that relays on BWS.
+See [Bitcore-wallet-client] (https://github.com/startcoin-project/bitcore-wallet-client) for the *official* client library that communicates to BWS, and verifies its responsed. Also check [Bitcore-wallet] (https://github.com/bitpay/bitcore-wallet) for a simple CLI wallet implementation that relays on BWS.
 
 BWS have a extensive test suite but have not been tested on production environments yet and have been recently released, so it it is still should be considered  BETA software.  
 
@@ -55,7 +55,7 @@ Old versions of BWS uses LevelDB to store data. There is a migration script avai
 ```
 Identity is the Peer-ID, this will identify the peer and its wallet. Signature is the current request signature, using `requestSigningKey`, the `m/1/1` derivative of the Extended Private Key.
 
-See [Bitcore Wallet Client](https://github.com/bitpay/bitcore-wallet-client/blob/master/lib/api.js#L73) for implementation details.
+See [Bitcore Wallet Client](https://github.com/startcoin-project/bitcore-wallet-client/blob/master/lib/api.js#L73) for implementation details.
 
 
 ## GET Endpoinds
