@@ -10,19 +10,30 @@ var config = {
   // https: true,
   // privateKeyFile: 'private.pem',
   // certificateFile: 'cert.pem',
+  ////// The following is only for certs which are not
+  ////// trusted by nodejs 'https' by default
+  ////// CAs like Verisign do not require this
+  // CAinter1: '', // ex. 'COMODORSADomainValidationSecureServerCA.crt'
+  // CAinter2: '', // ex. 'COMODORSAAddTrustCA.crt'
+  // CAroot: '', // ex. 'AddTrustExternalCARoot.crt'
 
   storageOpts: {
     mongoDb: {
-      host: 'localhost',
-      port: 27017,
+      uri: 'mongodb://localhost:27017/bws',
     },
   },
   lockOpts: {
     //  To use locker-server, uncomment this:
-    // lockerServer: {
-    //   host: 'localhost',
-    //   port: 3231,
-    // },
+    lockerServer: {
+      host: 'localhost',
+      port: 3231,
+    },
+  },
+  messageBrokerOpts: {
+    //  To use message broker server, uncomment this:
+    messageBrokerServer: {
+      url: 'http://localhost:3380',
+    },
   },
   blockchainExplorerOpts: {
     livenet: {
@@ -33,6 +44,14 @@ var config = {
       provider: 'insight',
       url: 'http://testnet.explorer.startcoin.org',
     },
+  },
+  // To use email notifications uncomment this:
+  emailOpts: {
+    host: 'localhost',
+    port: 25,
+    ignoreTLS: true,
+    subjectPrefix: '[Wallet Service]',
+    from: 'wallet-service@bitcore.io',
   },
 };
 module.exports = config;

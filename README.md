@@ -9,10 +9,11 @@ A Multisig HD Bitcore Wallet Service.
 
 # Description
 
-Bitcore Wallet Service facilitates multisig HD wallets creation and operation thru a (hopefully) simple and intuitive REST API.
+Bitcore Wallet Service facilitates multisig HD wallets creation and operation through a (hopefully) simple and intuitive REST API.
 
-BWS can usually be installed within minutes and acommodates all the needed infrastruture for peers in a multisig wallet to communicate, and operate with minimun server trust.
+BWS can usually be installed within minutes and accommodates all the needed infrastructure for peers in a multisig wallet to communicate and operate – with minimum server trust.
   
+
 See [Bitcore-wallet-client] (https://github.com/startcoin-project/bitcore-wallet-client) for the *official* client library that communicates to BWS, and verifies its responsed. Also check [Bitcore-wallet] (https://github.com/bitpay/bitcore-wallet) for a simple CLI wallet implementation that relays on BWS.
 
 BWS have a extensive test suite but have not been tested on production environments yet and have been recently released, so it it is still should be considered  BETA software.  
@@ -27,20 +28,14 @@ More about BWS at http://blog.bitpay.com/2015/03/05/bitcore-wallet.html
 
 BWS needs mongoDB. You can configure the connection at `config.js`
 
-BWS supports SSL and Clustering. To configure them see [config.js](https://github.com/bitpay/bitcore-wallet-service/blob/master/config.js). 
-
-To use clustering, an external DB server and Lock server need to be configured. The lock server can be started  `locker/locker.js`.
-
-# Migration from LevelDB
-
-Old versions of BWS uses LevelDB to store data. There is a migration script available at: `scripts/level2mongo.js`
+BWS supports SSL and Clustering. For a detailed guide on installing BWS with extra features see [Installing BWS](https://github.com/bitpay/bitcore-wallet-service/blob/master/installation.md). 
 
 
 # Security Considerations
  * Private keys are never sent to BWS. Copayers store them locally.
  * Extended public keys are stored on BWS. This allows BWS to easily check wallet balance, send offline notifications to copayers, etc.
  * During wallet creation, the initial copayer creates a wallet secret that contains a private key. All copayers need to prove they have the secret by signing their information with this private key when joining the wallet. The secret should be shared using secured channels.
- * A copayer could join the wallet more than once, and there is no mechanism to prevent this. See [wallet]((https://github.com/bitpay/bitcore-wallet)'s confirm command, for a method for confirming copayers.
+ * A copayer could join the wallet more than once, and there is no mechanism to prevent this. See [wallet](https://github.com/bitpay/bitcore-wallet)'s confirm command, for a method for confirming copayers.
  * All BWS responses are verified:
   * Addresses and change addresses are derived independently and locally by the copayers from their local data.
   * TX Proposals templates are signed by copayers and verified by others, so the BWS cannot create or tamper with them.
@@ -58,7 +53,7 @@ Identity is the Peer-ID, this will identify the peer and its wallet. Signature i
 See [Bitcore Wallet Client](https://github.com/startcoin-project/bitcore-wallet-client/blob/master/lib/api.js#L73) for implementation details.
 
 
-## GET Endpoinds
+## GET Endpoints
 `/v1/wallets/`: Get wallet information
 
 Returns:
@@ -100,7 +95,7 @@ Returns:
  * lockedAmount: Current balance of outstanding transaction proposals, that cannot be used on new transactions. 
  * byAddress array ['address', 'path', 'amount']: A list of addresses holding funds.
  
-## POST Endpoinds
+## POST Endpoints
 `/v1/wallets/`: Create a new Wallet
 
  Required Arguments:
@@ -120,7 +115,7 @@ Required Arguments:
  * name: Copayer Name
  * xPubKey - Extended Public Key for this copayer.
  * requestPubKey - Public Key used to check requests from this copayer.
- * copayerSignature - Signature sed by other copayers to verify the that the copayer joining knows the wallet secret.
+ * copayerSignature - Signature used by other copayers to verify that the copayer joining knows the wallet secret.
 
 Returns:
  * copayerId: Assigned ID of the copayer (to be used on x-identity header)
@@ -166,7 +161,7 @@ Returns:
  * includeCopayerBranches: Scan all copayer branches following BIP45 recommendation (defaults to false). 
 
   
-## DELETE Endpoinds
+## DELETE Endpoints
 `/v1/txproposals/:id/`: Deletes a transaction proposal. Only the creator can delete a TX Proposal, and only if it has no other signatures or rejections
 
  Returns:

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+var async = require('async');
 var fs = require('fs');
 
 var ExpressApp = require('./lib/expressapp');
@@ -26,35 +27,61 @@ var serverOpts = {};
 if (config.https) {
   serverOpts.key = fs.readFileSync(config.privateKeyFile || './ssl/privatekey.pem');
   serverOpts.cert = fs.readFileSync(config.certificateFile || './ssl/certificate.pem');
+  // This sets the intermediate CA certs only if they have all been designated in the config.js
+  if (config.CAinter1 && config.CAinter2 && config.CAroot) {
+    serverOpts.ca = [fs.readFileSync(config.CAinter1),
+                     fs.readFileSync(config.CAinter2),
+                     fs.readFileSync(config.CAroot)
+                    ];};
 }
 
 var start = function(cb) {
-  var server;
+  var expressApp = new ExpressApp();
+  var wsApp = new WsApp();
+
+  function doStart(cb) {
+    var server = config.https ? serverModule.createServer(serverOpts, expressApp.app) : serverModule.Server(expressApp.app);
+    async.parallel([
+
+      function(done) {
+        expressApp.start(config, done);
+      },
+      function(done) {
+        wsApp.start(server, config, done);
+      },
+    ], function(err) {
+      if (err) {
+        log.error('Could not start BWS instance', err);
+      }
+      if (cb) return cb(err);
+    });
+
+    return server;
+  };
 
   if (config.cluster) {
-    server = sticky(clusterInstances, function() {
-      ExpressApp.start(config, function(err, app) {
-        var server = config.https ? serverModule.createServer(serverOpts, app) :
-          serverModule.Server(app);
-        WsApp.start(server, config);
-        return server;
-      });
+    var server = sticky(clusterInstances, function() {
+      return doStart();
     });
-    return cb(server);
+    return cb(null, server);
   } else {
-    ExpressApp.start(config, function(err, app) {
-      server = config.https ? serverModule.createServer(serverOpts, app) :
-        serverModule.Server(app);
-      WsApp.start(server, config);
-      return cb(server);
+    var server = doStart(function(err) {
+      return cb(err, server);
     });
-  };
+  }
 };
 
 if (config.cluster && !config.lockOpts.lockerServer)
   throw 'When running in cluster mode, locker server need to be configured';
 
-start(function(server) {
+if (config.cluster && !config.messageBrokerOpts.messageBrokerServer)
+  throw 'When running in cluster mode, message broker server need to be configured';
+
+start(function(err, server) {
+  if (err) {
+    console.log('Could not start BWS:', err);
+    process.exit(0);
+  }
   server.listen(port, function(err) {
     if (err) console.log('ERROR: ', err);
     log.info('Bitcore Wallet Service running on port ' + port);

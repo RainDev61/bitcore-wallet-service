@@ -19,29 +19,25 @@ var Utils = require('../../lib/utils');
 var WalletUtils = require('bitcore-wallet-utils');
 var Bitcore = WalletUtils.Bitcore;
 var Storage = require('../../lib/storage');
-var BlockchainMonitor = require('../../lib/blockchainmonitor');
 
 var Model = require('../../lib/model');
-var Wallet = Model.Wallet;
-var TxProposal = Model.TxProposal;
-var Address = Model.Address;
-var Copayer = Model.Copayer;
 
 var WalletService = require('../../lib/server');
-var NotificationBroadcaster = require('../../lib/notificationbroadcaster');
+var EmailService = require('../../lib/emailservice');
+
 var TestData = require('../testdata');
 
 var helpers = {};
 helpers.getAuthServer = function(copayerId, cb) {
-  var signatureStub = sinon.stub(WalletService.prototype, '_verifySignature');
-  signatureStub.returns(true);
+  var verifyStub = sinon.stub(WalletService.prototype, '_verifySignature');
+  verifyStub.returns(true);
   WalletService.getInstanceWithAuth({
     copayerId: copayerId,
     message: 'dummy',
     signature: 'dummy',
   }, function(err, server) {
+    verifyStub.restore();
     if (err || !server) throw new Error('Could not login as copayerId ' + copayerId);
-    signatureStub.restore();
     return cb(server);
   });
 };
@@ -80,10 +76,16 @@ helpers.getSignedCopayerOpts = function(opts) {
   return opts;
 };
 
-helpers.createAndJoinWallet = function(m, n, cb) {
+helpers.createAndJoinWallet = function(m, n, opts, cb) {
+  if (_.isFunction(opts)) {
+    cb = opts;
+    opts = {};
+  }
+  opts = opts || {};
+
   var server = new WalletService();
   var copayerIds = [];
-  var offset = helpers.offset || 0;
+  var offset = opts.offset || 0;
 
   var walletOpts = {
     name: 'a wallet',
@@ -132,7 +134,6 @@ helpers.toSatoshi = function(btc) {
   }
 };
 
-// Amounts in satoshis 
 helpers.stubUtxos = function(server, wallet, amounts, cb) {
   var amounts = [].concat(amounts);
 
@@ -211,16 +212,34 @@ helpers.createAddresses = function(server, wallet, main, change, cb) {
   });
 };
 
-var db, storage, blockchainExplorer;
+var storage, blockchainExplorer;
 
-function openDb(cb) {
-  db = new tingodb.Db('./db/test', {});
-  return cb();
+var useMongo = false;
+
+function initStorage(cb) {
+  function getDb(cb) {
+    if (useMongo) {
+      var mongodb = require('mongodb');
+      mongodb.MongoClient.connect('mongodb://localhost:27017/bws_test', function(err, db) {
+        if (err) throw err;
+        return cb(db);
+      });
+    } else {
+      var db = new tingodb.Db('./db/test', {});
+      return cb(db);
+    }
+  }
+  getDb(function(db) {
+    storage = new Storage({
+      db: db
+    });
+    return cb();
+  });
 };
 
-function resetDb(cb) {
-  if (!db) return cb();
-  db.dropDatabase(function(err) {
+function resetStorage(cb) {
+  if (!storage.db) return cb();
+  storage.db.dropDatabase(function(err) {
     return cb();
   });
 };
@@ -228,28 +247,287 @@ function resetDb(cb) {
 
 describe('Wallet service', function() {
   before(function(done) {
-    openDb(function() {
-      storage = new Storage({
-        db: db
-      });
-      done();
-    });
+    initStorage(done);
   });
   beforeEach(function(done) {
-    resetDb(function() {
+    resetStorage(function() {
       blockchainExplorer = sinon.stub();
       WalletService.initialize({
         storage: storage,
         blockchainExplorer: blockchainExplorer,
-      }, function() {
-        helpers.offset = 0;
-        done();
-      });
+      }, done);
     });
   });
   after(function(done) {
     WalletService.shutDown(done);
   });
+
+  describe('Email notifications', function() {
+    var server, wallet, mailerStub, emailService;
+
+    beforeEach(function(done) {
+      helpers.createAndJoinWallet(2, 3, function(s, w) {
+        server = s;
+        wallet = w;
+
+        var i = 0;
+        async.eachSeries(w.copayers, function(copayer, next) {
+          helpers.getAuthServer(copayer.id, function(server) {
+            server.savePreferences({
+              email: 'copayer' + (++i) + '@domain.com',
+            }, next);
+          });
+        }, function(err) {
+          should.not.exist(err);
+
+          mailerStub = sinon.stub();
+          mailerStub.sendMail = sinon.stub();
+          mailerStub.sendMail.yields();
+
+          emailService = new EmailService();
+          emailService.start({
+            lockOpts: {},
+            messageBroker: server.messageBroker,
+            storage: storage,
+            mailer: mailerStub,
+            emailOpts: {
+              from: 'bws@dummy.net',
+              subjectPrefix: '[test wallet]',
+            },
+          }, function(err) {
+            should.not.exist(err);
+            done();
+          });
+        });
+      });
+    });
+
+    it('should notify copayers a new tx proposal has been created', function(done) {
+      helpers.stubUtxos(server, wallet, [1, 1], function() {
+        var txOpts = helpers.createProposalOpts('18PzpUFkFZE8zKWUPvfykkTxmB9oMR8qP7', 0.8, 'some message', TestData.copayers[0].privKey_1H_0);
+        server.createTx(txOpts, function(err, tx) {
+          should.not.exist(err);
+          setTimeout(function() {
+            var calls = mailerStub.sendMail.getCalls();
+            calls.length.should.equal(2);
+            var emails = _.map(calls, function(c) {
+              return c.args[0];
+            });
+            _.difference(['copayer2@domain.com', 'copayer3@domain.com'], _.pluck(emails, 'to')).should.be.empty;
+            var one = emails[0];
+            one.from.should.equal('bws@dummy.net');
+            one.subject.should.contain('New payment proposal');
+            one.text.should.contain(wallet.name);
+            one.text.should.contain(wallet.copayers[0].name);
+            server.storage.fetchUnsentEmails(function(err, unsent) {
+              should.not.exist(err);
+              unsent.should.be.empty;
+              done();
+            });
+          }, 100);
+        });
+      });
+    });
+
+    it('should notify copayers a new outgoing tx has been created', function(done) {
+      helpers.stubUtxos(server, wallet, [1, 1], function() {
+        var txOpts = helpers.createProposalOpts('18PzpUFkFZE8zKWUPvfykkTxmB9oMR8qP7', 0.8, 'some message', TestData.copayers[0].privKey_1H_0);
+
+        var txpId;
+        async.waterfall([
+
+          function(next) {
+            server.createTx(txOpts, next);
+          },
+          function(txp, next) {
+            txpId = txp.id;
+            async.eachSeries(_.range(2), function(i, next) {
+              var copayer = TestData.copayers[i];
+              helpers.getAuthServer(copayer.id, function(server) {
+                var signatures = helpers.clientSign(txp, copayer.xPrivKey);
+                server.signTx({
+                  txProposalId: txp.id,
+                  signatures: signatures,
+                }, next);
+              });
+            }, next);
+          },
+          function(next) {
+            helpers.stubBroadcast('999');
+            server.broadcastTx({
+              txProposalId: txpId,
+            }, next);
+          },
+        ], function(err) {
+          should.not.exist(err);
+
+          setTimeout(function() {
+            var calls = mailerStub.sendMail.getCalls();
+            var emails = _.map(_.takeRight(calls, 3), function(c) {
+              return c.args[0];
+            });
+            _.difference(['copayer1@domain.com', 'copayer2@domain.com', 'copayer3@domain.com'], _.pluck(emails, 'to')).should.be.empty;
+            var one = emails[0];
+            one.from.should.equal('bws@dummy.net');
+            one.subject.should.contain('Payment sent');
+            one.text.should.contain(wallet.name);
+            one.text.should.contain('800,000');
+            server.storage.fetchUnsentEmails(function(err, unsent) {
+              should.not.exist(err);
+              unsent.should.be.empty;
+              done();
+            });
+          }, 100);
+        });
+      });
+    });
+
+    it('should notify copayers a tx has been finally rejected', function(done) {
+      helpers.stubUtxos(server, wallet, 1, function() {
+        var txOpts = helpers.createProposalOpts('18PzpUFkFZE8zKWUPvfykkTxmB9oMR8qP7', 0.8, 'some message', TestData.copayers[0].privKey_1H_0);
+
+        var txpId;
+        async.waterfall([
+
+          function(next) {
+            server.createTx(txOpts, next);
+          },
+          function(txp, next) {
+            txpId = txp.id;
+            async.eachSeries(_.range(1, 3), function(i, next) {
+              var copayer = TestData.copayers[i];
+              helpers.getAuthServer(copayer.id, function(server) {
+                server.rejectTx({
+                  txProposalId: txp.id,
+                }, next);
+              });
+            }, next);
+          },
+        ], function(err) {
+          should.not.exist(err);
+
+          setTimeout(function() {
+            var calls = mailerStub.sendMail.getCalls();
+            var emails = _.map(_.takeRight(calls, 2), function(c) {
+              return c.args[0];
+            });
+            _.difference(['copayer1@domain.com', 'copayer2@domain.com'], _.pluck(emails, 'to')).should.be.empty;
+            var one = emails[0];
+            one.from.should.equal('bws@dummy.net');
+            one.subject.should.contain('Payment proposal rejected');
+            one.text.should.contain(wallet.name);
+            one.text.should.contain('copayer 2, copayer 3');
+            one.text.should.not.contain('copayer 1');
+            server.storage.fetchUnsentEmails(function(err, unsent) {
+              should.not.exist(err);
+              unsent.should.be.empty;
+              done();
+            });
+          }, 100);
+        });
+      });
+    });
+
+    it('should notify copayers of incoming txs', function(done) {
+      server.createAddress({}, function(err, address) {
+        should.not.exist(err);
+
+        // Simulate incoming tx notification
+        server._notify('NewIncomingTx', {
+          txid: '999',
+          address: address,
+          amount: 12300000,
+        }, function(err) {
+          setTimeout(function() {
+            var calls = mailerStub.sendMail.getCalls();
+            calls.length.should.equal(3);
+            var emails = _.map(calls, function(c) {
+              return c.args[0];
+            });
+            _.difference(['copayer1@domain.com', 'copayer2@domain.com', 'copayer3@domain.com'], _.pluck(emails, 'to')).should.be.empty;
+            var one = emails[0];
+            one.from.should.equal('bws@dummy.net');
+            one.subject.should.contain('New payment received');
+            one.text.should.contain(wallet.name);
+            one.text.should.contain('123,000');
+            server.storage.fetchUnsentEmails(function(err, unsent) {
+              should.not.exist(err);
+              unsent.should.be.empty;
+              done();
+            });
+          }, 100);
+        });
+      });
+    });
+
+    it('should notify each email address only once', function(done) {
+      // Set same email address for copayer1 and copayer2
+      server.savePreferences({
+        email: 'copayer2@domain.com',
+      }, function(err) {
+        server.createAddress({}, function(err, address) {
+          should.not.exist(err);
+
+          // Simulate incoming tx notification
+          server._notify('NewIncomingTx', {
+            txid: '999',
+            address: address,
+            amount: 12300000,
+          }, function(err) {
+            setTimeout(function() {
+              var calls = mailerStub.sendMail.getCalls();
+              calls.length.should.equal(2);
+              var emails = _.map(calls, function(c) {
+                return c.args[0];
+              });
+              _.difference(['copayer2@domain.com', 'copayer3@domain.com'], _.pluck(emails, 'to')).should.be.empty;
+              var one = emails[0];
+              one.from.should.equal('bws@dummy.net');
+              one.subject.should.contain('New payment received');
+              one.text.should.contain(wallet.name);
+              one.text.should.contain('123,000');
+              server.storage.fetchUnsentEmails(function(err, unsent) {
+                should.not.exist(err);
+                unsent.should.be.empty;
+                done();
+              });
+            }, 100);
+          });
+        });
+      });
+    });
+
+    it('should support multiple emailservice instances running concurrently', function(done) {
+      var emailService2 = new EmailService();
+      emailService2.start({
+        lock: emailService.lock, // Use same locker service
+        messageBroker: server.messageBroker,
+        storage: storage,
+        mailer: mailerStub,
+        emailOpts: {
+          from: 'bws2@dummy.net',
+          subjectPrefix: '[test wallet 2]',
+        },
+      }, function(err) {
+        helpers.stubUtxos(server, wallet, 1, function() {
+          var txOpts = helpers.createProposalOpts('18PzpUFkFZE8zKWUPvfykkTxmB9oMR8qP7', 0.8, 'some message', TestData.copayers[0].privKey_1H_0);
+          server.createTx(txOpts, function(err, tx) {
+            should.not.exist(err);
+            setTimeout(function() {
+              var calls = mailerStub.sendMail.getCalls();
+              calls.length.should.equal(2);
+              server.storage.fetchUnsentEmails(function(err, unsent) {
+                should.not.exist(err);
+                unsent.should.be.empty;
+                done();
+              });
+            }, 100);
+          });
+        });
+      });
+    });
+  });
+
 
   describe('#getInstanceWithAuth', function() {
 
@@ -464,7 +742,22 @@ describe('Wallet service', function() {
             var copayer = wallet.copayers[0];
             copayer.name.should.equal('me');
             copayer.id.should.equal(copayerId);
-            done();
+            server.getNotifications({}, function(err, notifications) {
+              should.not.exist(err);
+              var notif = _.find(notifications, {
+                type: 'NewCopayer'
+              });
+              should.exist(notif);
+              notif.data.walletId.should.equal(walletId);
+              notif.data.copayerId.should.equal(copayerId);
+              notif.data.copayerName.should.equal('me');
+
+              notif = _.find(notifications, {
+                type: 'WalletComplete'
+              });
+              should.not.exist(notif);
+              done();
+            });
           });
         });
       });
@@ -534,7 +827,7 @@ describe('Wallet service', function() {
       });
     });
 
-    it('should fail two wallets with same xPubKey', function(done) {
+    it('should fail to join two wallets with same xPubKey', function(done) {
       var copayerOpts = helpers.getSignedCopayerOpts({
         walletId: walletId,
         name: 'me',
@@ -616,6 +909,27 @@ describe('Wallet service', function() {
           should.not.exist(err);
           wallet.status.should.equal('complete');
           wallet.publicKeyRing.length.should.equal(3);
+          server.getNotifications({}, function(err, notifications) {
+            should.not.exist(err);
+            var notif = _.find(notifications, {
+              type: 'WalletComplete'
+            });
+            should.exist(notif);
+            notif.data.walletId.should.equal(wallet.id);
+            done();
+          });
+        });
+      });
+    });
+
+    it('should not notify WalletComplete if 1-of-1', function(done) {
+      helpers.createAndJoinWallet(1, 1, function(server) {
+        server.getNotifications({}, function(err, notifications) {
+          should.not.exist(err);
+          var notif = _.find(notifications, {
+            type: 'WalletComplete'
+          });
+          should.not.exist(notif);
           done();
         });
       });
@@ -672,7 +986,9 @@ describe('Wallet service', function() {
     it('should create address', function(done) {
       server.createAddress({}, function(err, address) {
         should.not.exist(err);
-        address.should.exist;
+        should.exist(address);
+        address.walletId.should.equal(wallet.id);
+        address.network.should.equal('livenet');
         address.address.should.equal('3KxttbKQQPWmpsnXZ3rB4mgJTuLnVR7frg');
         address.isChange.should.be.false;
         address.path.should.equal('m/2147483647/0/0');
@@ -715,11 +1031,66 @@ describe('Wallet service', function() {
           server.storage.storeAddressAndWallet.restore();
           server.createAddress({}, function(err, address) {
             should.not.exist(err);
-            address.should.exist;
+            should.exist(address);
             address.address.should.equal('3KxttbKQQPWmpsnXZ3rB4mgJTuLnVR7frg');
             address.path.should.equal('m/2147483647/0/0');
             done();
           });
+        });
+      });
+    });
+  });
+
+  describe('Preferences', function() {
+    var server, wallet;
+    beforeEach(function(done) {
+      helpers.createAndJoinWallet(2, 2, function(s, w) {
+        server = s;
+        wallet = w;
+        done();
+      });
+    });
+
+    it('should save & retrieve preferences', function(done) {
+      server.savePreferences({
+        email: 'dummy@dummy.com'
+      }, function(err) {
+        should.not.exist(err);
+        server.getPreferences({}, function(err, preferences) {
+          should.not.exist(err);
+          should.exist(preferences);
+          preferences.email.should.equal('dummy@dummy.com');
+          done();
+        });
+      });
+    });
+    it('should save preferences only for requesting copayer', function(done) {
+      server.savePreferences({
+        email: 'dummy@dummy.com'
+      }, function(err) {
+        should.not.exist(err);
+        helpers.getAuthServer(wallet.copayers[1].id, function(server2) {
+          server2.getPreferences({}, function(err, preferences) {
+            should.not.exist(err);
+            should.not.exist(preferences.email);
+            done();
+          });
+        });
+      });
+    });
+    it.skip('should save preferences only for requesting wallet', function(done) {});
+    it('should validate email address', function(done) {
+      server.savePreferences({
+        email: ' '
+      }, function(err) {
+        should.exist(err);
+        err.message.should.contain('email');
+        server.savePreferences({
+          email: 'dummy@' + _.repeat('domain', 50),
+        }, function(err) {
+          should.exist(err);
+          err.message.should.contain('email');
+          done();
         });
       });
     });
@@ -792,6 +1163,17 @@ describe('Wallet service', function() {
             balance.byAddress[0].address.should.equal(utxos[0].address);
             done();
           });
+        });
+      });
+    });
+    it('should fail gracefully when blockchain is unreachable', function(done) {
+      blockchainExplorer.getUnspentUtxos = sinon.stub().callsArgWith(1, 'dummy error');
+      server.createAddress({}, function(err, address) {
+        should.not.exist(err);
+        server.getBalance({}, function(err, balance) {
+          should.exist(err);
+          err.code.should.equal('BLOCKCHAINERROR');
+          done();
         });
       });
     });
@@ -877,6 +1259,7 @@ describe('Wallet service', function() {
           should.not.exist(err);
           should.exist(tx);
           tx.walletId.should.equal(wallet.id);
+          tx.network.should.equal('livenet');
           tx.creatorId.should.equal(wallet.copayers[0].id);
           tx.message.should.equal('some message');
           tx.isAccepted().should.equal.false;
@@ -886,6 +1269,8 @@ describe('Wallet service', function() {
           server.getPendingTxs({}, function(err, txs) {
             should.not.exist(err);
             txs.length.should.equal(1);
+            // creator
+            txs[0].deleteLockTime.should.equal(0);
             server.getBalance({}, function(err, balance) {
               should.not.exist(err);
               balance.totalAmount.should.equal(helpers.toSatoshi(300));
@@ -920,6 +1305,19 @@ describe('Wallet service', function() {
               done();
             });
           });
+        });
+      });
+    });
+
+    it('should fail gracefully if unable to reach the blockchain', function(done) {
+      blockchainExplorer.getUnspentUtxos = sinon.stub().callsArgWith(1, 'dummy error');
+      server.createAddress({}, function(err, address) {
+        should.not.exist(err);
+        var txOpts = helpers.createProposalOpts('18PzpUFkFZE8zKWUPvfykkTxmB9oMR8qP7', 80, 'some message', TestData.copayers[0].privKey_1H_0);
+        server.createTx(txOpts, function(err, tx) {
+          should.exist(err);
+          err.code.should.equal('BLOCKCHAINERROR');
+          done();
         });
       });
     });
@@ -1185,6 +1583,83 @@ describe('Wallet service', function() {
     });
   });
 
+  describe('#createTx backoff time', function(done) {
+    var server, wallet, txid;
+
+    beforeEach(function(done) {
+      helpers.createAndJoinWallet(2, 2, function(s, w) {
+        server = s;
+        wallet = w;
+        helpers.stubUtxos(server, wallet, _.range(2, 6), function() {
+          done();
+        });
+      });
+    });
+
+    it('should follow backoff time after consecutive rejections', function(done) {
+      async.series([
+
+        function(next) {
+          async.each(_.range(3), function(i, next) {
+              var txOpts = helpers.createProposalOpts('18PzpUFkFZE8zKWUPvfykkTxmB9oMR8qP7', 1, null, TestData.copayers[0].privKey_1H_0);
+              server.createTx(txOpts, function(err, tx) {
+                should.not.exist(err);
+                server.rejectTx({
+                  txProposalId: tx.id,
+                  reason: 'some reason',
+                }, next);
+              });
+            },
+            next);
+        },
+        function(next) {
+          // Allow a 4th tx
+          var txOpts = helpers.createProposalOpts('18PzpUFkFZE8zKWUPvfykkTxmB9oMR8qP7', 1, null, TestData.copayers[0].privKey_1H_0);
+          server.createTx(txOpts, function(err, tx) {
+            server.rejectTx({
+              txProposalId: tx.id,
+              reason: 'some reason',
+            }, next);
+          });
+        },
+        function(next) {
+          // Do not allow before backoff time
+          var txOpts = helpers.createProposalOpts('18PzpUFkFZE8zKWUPvfykkTxmB9oMR8qP7', 1, null, TestData.copayers[0].privKey_1H_0);
+          server.createTx(txOpts, function(err, tx) {
+            should.exist(err);
+            err.code.should.equal('NOTALLOWEDTOCREATETX');
+            next();
+          });
+        },
+        function(next) {
+          var clock = sinon.useFakeTimers(Date.now() + (WalletService.backoffTimeMinutes + 2) * 60 * 1000);
+          var txOpts = helpers.createProposalOpts('18PzpUFkFZE8zKWUPvfykkTxmB9oMR8qP7', 1, null, TestData.copayers[0].privKey_1H_0);
+          server.createTx(txOpts, function(err, tx) {
+            clock.restore();
+            server.rejectTx({
+              txProposalId: tx.id,
+              reason: 'some reason',
+            }, next);
+          });
+        },
+        function(next) {
+          // Do not allow a 5th tx before backoff time
+          var clock = sinon.useFakeTimers(Date.now() + (WalletService.backoffTimeMinutes + 2) * 60 * 1000 + 1);
+          var txOpts = helpers.createProposalOpts('18PzpUFkFZE8zKWUPvfykkTxmB9oMR8qP7', 1, null, TestData.copayers[0].privKey_1H_0);
+          server.createTx(txOpts, function(err, tx) {
+            clock.restore();
+            should.exist(err);
+            err.code.should.equal('NOTALLOWEDTOCREATETX');
+            next();
+          });
+        },
+      ], function(err) {
+        should.not.exist(err);
+        done();
+      });
+    });
+  });
+
   describe('#rejectTx', function() {
     var server, wallet, txid;
 
@@ -1195,7 +1670,6 @@ describe('Wallet service', function() {
         helpers.stubUtxos(server, wallet, _.range(1, 9), function() {
           var txOpts = helpers.createProposalOpts('18PzpUFkFZE8zKWUPvfykkTxmB9oMR8qP7', 10, null, TestData.copayers[0].privKey_1H_0);
           server.createTx(txOpts, function(err, tx) {
-
             should.not.exist(err);
             should.exist(tx);
             txid = tx.id;
@@ -1510,7 +1984,7 @@ describe('Wallet service', function() {
       });
     });
 
-    it('should brodcast a tx', function(done) {
+    it('should broadcast a tx', function(done) {
       var clock = sinon.useFakeTimers(1234000);
       helpers.stubBroadcast('999');
       server.broadcastTx({
@@ -1530,7 +2004,7 @@ describe('Wallet service', function() {
       });
     });
 
-    it('should fail to brodcast an already broadcasted tx', function(done) {
+    it('should fail to brodcast a tx already marked as broadcasted', function(done) {
       helpers.stubBroadcast('999');
       server.broadcastTx({
         txProposalId: txpid
@@ -1564,10 +2038,55 @@ describe('Wallet service', function() {
 
     it('should keep tx as accepted if unable to broadcast it', function(done) {
       helpers.stubBroadcastFail();
+      blockchainExplorer.getTransaction = sinon.stub().callsArgWith(1, null, null);
       server.broadcastTx({
         txProposalId: txpid
       }, function(err) {
         should.exist(err);
+        err.code.should.equal('BLOCKCHAINERROR');
+        server.getTx({
+          txProposalId: txpid
+        }, function(err, txp) {
+          should.not.exist(err);
+          should.not.exist(txp.txid);
+          txp.isBroadcasted().should.be.false;
+          should.not.exist(txp.broadcastedOn);
+          txp.isAccepted().should.be.true;
+          done();
+        });
+      });
+    });
+
+    it('should mark tx as broadcasted if accepted but already in blockchain', function(done) {
+      helpers.stubBroadcastFail();
+      blockchainExplorer.getTransaction = sinon.stub().callsArgWith(1, null, {
+        txid: '999'
+      });
+      server.broadcastTx({
+        txProposalId: txpid
+      }, function(err) {
+        should.not.exist(err);
+        server.getTx({
+          txProposalId: txpid
+        }, function(err, txp) {
+          should.not.exist(err);
+          should.exist(txp.txid);
+          txp.txid.should.equal('999');
+          txp.isBroadcasted().should.be.true;
+          should.exist(txp.broadcastedOn);
+          done();
+        });
+      });
+    });
+
+    it('should keep tx as accepted if broadcast fails and cannot check tx in blockchain', function(done) {
+      helpers.stubBroadcastFail();
+      blockchainExplorer.getTransaction = sinon.stub().callsArgWith(1, 'bc check error');
+      server.broadcastTx({
+        txProposalId: txpid
+      }, function(err) {
+        should.exist(err);
+        err.code.should.equal('BLOCKCHAINERROR');
         server.getTx({
           txProposalId: txpid
         }, function(err, txp) {
@@ -1851,6 +2370,7 @@ describe('Wallet service', function() {
               next();
             });
           }, function(err) {
+            clock.restore();
             return done(err);
           });
         });
@@ -2044,7 +2564,6 @@ describe('Wallet service', function() {
       server.getPendingTxs({}, function(err, txs) {
         var tx = txs[2];
         var signatures = helpers.clientSign(tx, TestData.copayers[0].xPrivKey);
-        sinon.spy(server, '_emit');
         server.signTx({
           txProposalId: tx.id,
           signatures: signatures,
@@ -2062,11 +2581,6 @@ describe('Wallet service', function() {
               should.not.exist(err);
               var types = _.pluck(notifications, 'type');
               types.should.deep.equal(['NewOutgoingTx', 'TxProposalFinallyAccepted', 'TxProposalAcceptedBy']);
-              // Check also events
-              server._emit.getCall(0).args[1].type.should.equal('TxProposalAcceptedBy');
-              server._emit.getCall(1).args[1].type.should.equal('TxProposalFinallyAccepted');;
-              server._emit.getCall(2).args[1].type.should.equal('NewOutgoingTx');
-
               done();
             });
           });
@@ -2138,8 +2652,9 @@ describe('Wallet service', function() {
       async.series([
 
         function(next) {
-          helpers.offset = 1;
-          helpers.createAndJoinWallet(1, 1, function(s, w) {
+          helpers.createAndJoinWallet(1, 1, {
+            offset: 1
+          }, function(s, w) {
             server2 = s;
             wallet2 = w;
 
@@ -2221,6 +2736,7 @@ describe('Wallet service', function() {
       });
     });
 
+
     it('should allow creator to remove an unsigned TX', function(done) {
       server.removePendingTx({
         txProposalId: txp.id
@@ -2233,7 +2749,7 @@ describe('Wallet service', function() {
       });
     });
 
-    it('should allow creator to remove an signed TX by himself', function(done) {
+    it('should allow creator to remove a signed TX by himself', function(done) {
       var signatures = helpers.clientSign(txp, TestData.copayers[0].xPrivKey);
       server.signTx({
         txProposalId: txp.id,
@@ -2309,7 +2825,8 @@ describe('Wallet service', function() {
         server2.removePendingTx({
           txProposalId: txp.id
         }, function(err) {
-          err.message.should.contain('creators');
+          should.exist(err);
+          err.code.should.contain('TXCANNOTREMOVE');
           server2.getPendingTxs({}, function(err, txs) {
             txs.length.should.equal(1);
             done();
@@ -2318,7 +2835,7 @@ describe('Wallet service', function() {
       });
     });
 
-    it('should not allow creator copayer to remove an TX signed by other copayer', function(done) {
+    it('should not allow creator copayer to remove a TX signed by other copayer, in less than 24hrs', function(done) {
       helpers.getAuthServer(wallet.copayers[1].id, function(server2) {
         var signatures = helpers.clientSign(txp, TestData.copayers[1].xPrivKey);
         server2.signTx({
@@ -2329,8 +2846,76 @@ describe('Wallet service', function() {
           server.removePendingTx({
             txProposalId: txp.id
           }, function(err) {
-            err.code.should.equal('TXACTIONED');
-            err.message.should.contain('other copayers');
+            err.code.should.equal('TXCANNOTREMOVE');
+            err.message.should.contain('Cannot remove');
+            done();
+          });
+        });
+      });
+    });
+
+    it('should allow creator copayer to remove a TX rejected by other copayer, in less than 24hrs', function(done) {
+      helpers.getAuthServer(wallet.copayers[1].id, function(server2) {
+        var signatures = helpers.clientSign(txp, TestData.copayers[1].xPrivKey);
+        server2.rejectTx({
+          txProposalId: txp.id,
+          signatures: signatures,
+        }, function(err) {
+          should.not.exist(err);
+          server.removePendingTx({
+            txProposalId: txp.id
+          }, function(err) {
+            should.not.exist(err);
+            done();
+          });
+        });
+      });
+    });
+
+
+
+    it('should allow creator copayer to remove a TX signed by other copayer, after 24hrs', function(done) {
+      helpers.getAuthServer(wallet.copayers[1].id, function(server2) {
+        var signatures = helpers.clientSign(txp, TestData.copayers[1].xPrivKey);
+        server2.signTx({
+          txProposalId: txp.id,
+          signatures: signatures,
+        }, function(err) {
+          should.not.exist(err);
+
+          server.getPendingTxs({}, function(err, txs) {
+            should.not.exist(err);
+            txs[0].deleteLockTime.should.be.above(WalletService.deleteLockTime - 10);
+
+            var clock = sinon.useFakeTimers(Date.now() + 1 + 24 * 3600 * 1000);
+            server.removePendingTx({
+              txProposalId: txp.id
+            }, function(err) {
+              should.not.exist(err);
+              clock.restore();
+              done();
+            });
+          });
+        });
+      });
+    });
+
+
+    it('should allow other copayer to remove a TX signed, after 24hrs', function(done) {
+      helpers.getAuthServer(wallet.copayers[1].id, function(server2) {
+        var signatures = helpers.clientSign(txp, TestData.copayers[1].xPrivKey);
+        server2.signTx({
+          txProposalId: txp.id,
+          signatures: signatures,
+        }, function(err) {
+          should.not.exist(err);
+
+          var clock = sinon.useFakeTimers(Date.now() + 2000 + WalletService.deleteLockTime * 1000);
+          server2.removePendingTx({
+            txProposalId: txp.id
+          }, function(err) {
+            should.not.exist(err);
+            clock.restore();
             done();
           });
         });
@@ -2588,6 +3173,14 @@ describe('Wallet service', function() {
         });
       }, done);
     });
+    it('should fail gracefully if unable to reach the blockchain', function(done) {
+      blockchainExplorer.getTransactions = sinon.stub().callsArgWith(3, 'dummy error');
+      server.getTxHistory({}, function(err, txs) {
+        should.exist(err);
+        err.code.should.equal('BLOCKCHAINERROR');
+        done();
+      });
+    });
   });
 
   describe('#scan', function() {
@@ -2624,17 +3217,21 @@ describe('Wallet service', function() {
       ];
       server.scan({}, function(err) {
         should.not.exist(err);
-        server.storage.fetchAddresses(wallet.id, function(err, addresses) {
-          should.exist(addresses);
-          addresses.length.should.equal(expectedPaths.length);
-          var paths = _.pluck(addresses, 'path');
-          _.difference(paths, expectedPaths).length.should.equal(0);
-          server.createAddress({}, function(err, address) {
-            should.not.exist(err);
-            address.path.should.equal('m/2147483647/0/4');
-            done();
+        server.getWallet({}, function(err, wallet) {
+          should.not.exist(err);
+          wallet.scanStatus.should.equal('success');
+          server.storage.fetchAddresses(wallet.id, function(err, addresses) {
+            should.exist(addresses);
+            addresses.length.should.equal(expectedPaths.length);
+            var paths = _.pluck(addresses, 'path');
+            _.difference(paths, expectedPaths).length.should.equal(0);
+            server.createAddress({}, function(err, address) {
+              should.not.exist(err);
+              address.path.should.equal('m/2147483647/0/4');
+              done();
+            });
           });
-        })
+        });
       });
     });
     it('should scan main addresses & copayer addresses', function(done) {
@@ -2711,8 +3308,22 @@ describe('Wallet service', function() {
         done();
       });
     });
-    it.skip('should abort scan if there is an error checking address activity', function(done) {});
-
+    it('should abort scan if there is an error checking address activity', function(done) {
+      blockchainExplorer.getAddressActivity = sinon.stub().callsArgWith(1, 'dummy error');
+      server.scan({}, function(err) {
+        should.exist(err);
+        err.code.should.equal('BLOCKCHAINERROR');
+        server.getWallet({}, function(err, wallet) {
+          should.not.exist(err);
+          wallet.scanStatus.should.equal('error');
+          server.storage.fetchAddresses(wallet.id, function(err, addresses) {
+            should.not.exist(err);
+            addresses.should.be.empty;
+            done();
+          });
+        });
+      });
+    });
   });
 
   describe('#startScan', function() {
@@ -2731,7 +3342,7 @@ describe('Wallet service', function() {
     });
     afterEach(function() {
       WalletService.scanConfig = scanConfigOld;
-      NotificationBroadcaster.removeAllListeners();
+      server.messageBroker.removeAllListeners();
     });
 
     it('should start an asynchronous scan', function(done) {
@@ -2748,7 +3359,7 @@ describe('Wallet service', function() {
         'm/2147483647/1/0',
         'm/2147483647/1/1',
       ];
-      WalletService.onNotification(function(n) {
+      server.messageBroker.onMessage(function(n) {
         if (n.type == 'ScanFinished') {
           server.getWallet({}, function(err, wallet) {
             should.exist(wallet.scanStatus);
@@ -2774,7 +3385,7 @@ describe('Wallet service', function() {
     });
     it('should set scan status error when unable to reach blockchain', function(done) {
       blockchainExplorer.getAddressActivity = sinon.stub().yields('dummy error');
-      WalletService.onNotification(function(n) {
+      server.messageBroker.onMessage(function(n) {
         if (n.type == 'ScanFinished') {
           should.exist(n.data.error);
           server.getWallet({}, function(err, wallet) {
@@ -2793,7 +3404,7 @@ describe('Wallet service', function() {
       WalletService.scanConfig.SCAN_WINDOW = 1;
 
       var scans = 0;
-      WalletService.onNotification(function(n) {
+      server.messageBroker.onMessage(function(n) {
         if (n.type == 'ScanFinished') {
           scans++;
           if (scans == 2) done();
@@ -3007,7 +3618,6 @@ describe('Wallet service', function() {
           should.not.exist(err);
           var copayerId2 = result.copayerId;
 
-
           helpers.getAuthServer(copayerId, function(server) {
             server.getWallet({}, function(err, wallet) {
 
@@ -3028,108 +3638,6 @@ describe('Wallet service', function() {
               });
             });
           });
-        });
-      });
-    });
-  });
-});
-
-
-describe('Blockchain monitor', function() {
-  var addressSubscriber;
-
-  before(function(done) {
-    openDb(function() {
-      storage = new Storage({
-        db: db
-      });
-      done();
-    });
-  });
-
-  beforeEach(function(done) {
-    addressSubscriber = sinon.stub();
-    addressSubscriber.subscribe = sinon.stub();
-    sinon.stub(BlockchainMonitor.prototype, '_getAddressSubscriber').onFirstCall().returns(addressSubscriber);
-
-    resetDb(function() {
-      blockchainExplorer = sinon.stub();
-      WalletService.initialize({
-        storage: storage,
-        blockchainExplorer: blockchainExplorer,
-      }, function() {
-        helpers.offset = 0;
-        done();
-      });
-    });
-  });
-  afterEach(function() {
-    BlockchainMonitor.prototype._getAddressSubscriber.restore();
-  });
-  after(function(done) {
-    WalletService.shutDown(done);
-  });
-
-  it('should subscribe wallet', function(done) {
-    var monitor = new BlockchainMonitor();
-    helpers.createAndJoinWallet(2, 2, function(server, wallet) {
-      server.createAddress({}, function(err, address1) {
-        should.not.exist(err);
-        server.createAddress({}, function(err, address2) {
-          should.not.exist(err);
-          monitor.subscribeWallet(server, function(err) {
-            should.not.exist(err);
-            addressSubscriber.subscribe.calledTwice.should.be.true;
-            addressSubscriber.subscribe.calledWith(address1.address).should.be.true;
-            addressSubscriber.subscribe.calledWith(address2.address).should.be.true;
-            done();
-          });
-        });
-      });
-    });
-  });
-
-  it('should be able to subscribe new address', function(done) {
-    var monitor = new BlockchainMonitor();
-    helpers.createAndJoinWallet(2, 2, function(server, wallet) {
-      server.createAddress({}, function(err, address1) {
-        should.not.exist(err);
-        monitor.subscribeWallet(server, function(err) {
-          should.not.exist(err);
-          addressSubscriber.subscribe.calledOnce.should.be.true;
-          addressSubscriber.subscribe.calledWith(address1.address).should.be.true;
-          server.createAddress({}, function(err, address2) {
-            should.not.exist(err);
-            monitor.subscribeAddresses(wallet.id, address2.address);
-            addressSubscriber.subscribe.calledTwice.should.be.true;
-            addressSubscriber.subscribe.calledWith(address2.address).should.be.true;
-            done();
-          });
-        });
-      });
-    });
-  });
-
-  it('should create NewIncomingTx notification when a new tx arrives on registered address', function(done) {
-    var monitor = new BlockchainMonitor();
-    helpers.createAndJoinWallet(2, 2, function(server, wallet) {
-      server.createAddress({}, function(err, address1) {
-        should.not.exist(err);
-        monitor.subscribeWallet(server, function(err) {
-          should.not.exist(err);
-          addressSubscriber.subscribe.calledOnce.should.be.true;
-          addressSubscriber.subscribe.getCall(0).args[0].should.equal(address1.address);
-          var handler = addressSubscriber.subscribe.getCall(0).args[1];
-          _.isFunction(handler).should.be.true;
-
-          monitor.on('notification', function(notification) {
-            notification.type.should.equal('NewIncomingTx');
-            notification.data.address.should.equal(address1.address);
-            notification.data.txid.should.equal('txid');
-            done();
-          });
-
-          handler('txid');
         });
       });
     });

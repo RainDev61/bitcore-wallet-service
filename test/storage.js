@@ -16,8 +16,15 @@ var db, storage;
 
 function openDb(cb) {
   db = new tingodb.Db('./db/test', {});
+  // HACK: There appears to be a bug in TingoDB's close function where the callback is not being executed
+  db.__close = db.close;
+  db.close = function(force, cb) {
+    this.__close(force, cb);
+    return cb();
+  };
   return cb();
 };
+
 
 function resetDb(cb) {
   if (!db) return cb();
@@ -133,6 +140,7 @@ describe('Storage', function() {
         proposals = _.map(_.range(4), function(i) {
           var tx = Model.TxProposal.create({
             walletId: '123',
+            toAddress: '18PzpUFkFZE8zKWUPvfykkTxmB9oMR8qP7',
             creatorId: wallet.copayers[0].id,
             amount: i + 100,
           });
