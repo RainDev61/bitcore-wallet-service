@@ -38,11 +38,11 @@ var config = {
   blockchainExplorerOpts: {
     livenet: {
       provider: 'insight',
-      url: 'http://explorer.startcoin.org',
+      url: 'https://insight.startwallet.com',
     },
     testnet: {
       provider: 'insight',
-      url: 'http://testnet.explorer.startcoin.org',
+      url: 'https://test-insight.startwallet.com',
     },
   },
   // To use email notifications uncomment this:
@@ -51,7 +51,7 @@ var config = {
     port: 25,
     ignoreTLS: true,
     subjectPrefix: '[Wallet Service]',
-    from: 'wallet-service@bitcore.io',
+    from: 'wallet-service@startwallet.com',
   },
 };
 module.exports = config;
