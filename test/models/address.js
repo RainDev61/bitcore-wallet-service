@@ -10,7 +10,7 @@ var Address = require('../../lib/model/address');
 describe('Address', function() {
   it('should create livenet address', function() {
     var x = Address.create({
-      address: '3KxttbKQQPWmpsnXZ3rB4mgJTuLnVR7frg',
+      address: '3Q7DLeQQNLVzMKRGctt1WHdR5nbp6gijxv',
       walletId: '123',
       isChange: false,
       path: 'm/0/1',
@@ -21,7 +21,7 @@ describe('Address', function() {
   });
   it('should create testnet address', function() {
     var x = Address.create({
-      address: 'mp5xaa4uBj16DJt1fuA3D9fejHuCzeb7hj',
+      address: 'tGLmptjyyrvYRJmeC72ujHPAAaXwmQjvS8',
       walletId: '123',
       isChange: false,
       path: 'm/0/1',

@@ -140,7 +140,7 @@ describe('Storage', function() {
         proposals = _.map(_.range(4), function(i) {
           var tx = Model.TxProposal.create({
             walletId: '123',
-            toAddress: '18PzpUFkFZE8zKWUPvfykkTxmB9oMR8qP7',
+            toAddress: 'sLfMksuMC7Z1BnRnfhfdXVgb4FDKo2xrDg',
             creatorId: wallet.copayers[0].id,
             amount: i + 100,
           });

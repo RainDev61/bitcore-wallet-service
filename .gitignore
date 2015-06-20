@@ -34,6 +34,6 @@ db/*
 multilevel/db/*
 
 
-.idea/workspace.xml
+.idea/*
 
-.idea/workspace.xml
+.idea/bitcore-wallet-service.iml
