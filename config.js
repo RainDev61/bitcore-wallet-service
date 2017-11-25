@@ -38,7 +38,7 @@ var config = {
   blockchainExplorerOpts: {
     livenet: {
       provider: 'insight',
-      url: 'https://insight.startwallet.com',
+      url: 'http://www.iridiumblock.com',
     },
     testnet: {
       provider: 'insight',
